@@ -113,6 +113,56 @@ export class WorkflowEngine {
           payload: 'Context slice prepared for SYNTH'
         });
       }
+
+      if (agentKind === 'SYNTH' && result.output) {
+        // Store the planJson for AUDIT
+        fullContext.planJson = result.output.planJson;
+        
+        // Parse planJson and extract first plan step for DRIVE
+        try {
+          const plan = JSON.parse(result.output.planJson);
+          this.bus.publish({
+            ts: Date.now(),
+            type: 'log',
+            payload: `Parsed plan structure: ${JSON.stringify({
+              hasPlan: !!plan.plan,
+              planIsArray: Array.isArray(plan.plan),
+              planLength: plan.plan?.length || 0,
+              firstStep: plan.plan?.[0] || null
+            })}`
+          });
+          
+          if (plan.plan && Array.isArray(plan.plan) && plan.plan.length > 0) {
+            fullContext.planStep = plan.plan[0]; // Take first plan step for now
+            this.bus.publish({
+              ts: Date.now(),
+              type: 'log',
+              payload: `Plan step description: ${fullContext.planStep?.description || 'undefined'}`
+            });
+          } else {
+            throw new Error('Plan JSON does not contain valid plan steps');
+          }
+        } catch (parseError) {
+          this.bus.publish({
+            ts: Date.now(),
+            type: 'log',
+            payload: `Failed to parse planJson: ${result.output.planJson}`
+          });
+          throw new Error(`Failed to parse plan JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+        }
+        
+        // Log context slice preparation for DRIVE
+        this.bus.publish({
+          ts: Date.now(),
+          type: 'log',
+          payload: 'Context slice prepared for DRIVE with first plan step'
+        });
+      }
+
+      if (agentKind === 'DRIVE' && result.output) {
+        // Update artifacts from DRIVE execution
+        fullContext.artifacts = result.output.artifacts;
+      }
     } catch (error) {
       // Publish error event on final failure
       this.bus.publish({
