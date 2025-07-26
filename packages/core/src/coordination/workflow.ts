@@ -63,7 +63,7 @@ export class WorkflowStateMachine {
       [WorkflowState.PLANNING]: WorkflowState.EXECUTING,
       [WorkflowState.EXECUTING]: WorkflowState.REVIEW,
       [WorkflowState.REVIEW]: WorkflowState.DONE,
-      [WorkflowState.REPLAN]: WorkflowState.EXECUTING,
+      [WorkflowState.REPLAN]: WorkflowState.PLANNING,
     };
 
     const nextState = nextStates[this._state];
@@ -86,14 +86,15 @@ export class WorkflowStateMachine {
   }
 
   transitionToReplan(): void {
-    if (this._state !== WorkflowState.REVIEW) {
-      throw new Error('Can only transition to REPLAN from REVIEW state');
+    if (this._state !== WorkflowState.REVIEW && this._state !== WorkflowState.DONE && this._state !== WorkflowState.EXECUTING) {
+      throw new Error(`Can only transition to REPLAN from REVIEW, DONE, or EXECUTING state, but current state is ${this._state}`);
     }
+    const prevState = this._state;
     this._state = WorkflowState.REPLAN;
     this.bus.publish({
       ts: Date.now(),
       type: 'log',
-      payload: 'State transition: REVIEW → REPLAN'
+      payload: `State transition: ${prevState} → REPLAN`
     });
   }
 

@@ -46,10 +46,10 @@ describe('Workflow Smoke Tests', () => {
     // the workflow will succeed at SYNTH but fail at DRIVE due to insufficient plan data
     const detailedInput = 'Create a comprehensive Node.js application with TypeScript that implements a RESTful API for managing user accounts, including authentication, data validation, error handling, and proper database integration using PostgreSQL';
     
-    // The workflow currently fails at the DRIVE stage due to plan step parsing issues
+    // The workflow will go through replan cycles and eventually hit max replans limit
     await expect(async () => {
       await engine.run(detailedInput);
-    }).rejects.toThrow(/Drive execution failed/);
+    }).rejects.toThrow(/Workflow failed after 3 re-plan attempts/);
     
     // Verify that GeminiChat was called for clarification analysis (using fallback prompt)
     expect(mockGeminiChat.sendMessage).toHaveBeenCalledWith(
