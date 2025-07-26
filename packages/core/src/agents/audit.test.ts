@@ -4,16 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { promises as fs } from 'fs';
 import { AuditAgent } from './audit.js';
 import { ChimeraEventBus } from '../event-bus/bus.js';
 import { AgentType } from '../event-bus/types.js';
 import type { ChimeraPlan } from '../interfaces/chimera.js';
+import type { GeminiChat } from '../core/geminiChat.js';
+import * as mindLoader from '../utils/mindLoader.js';
 
-// Mock the mind directory import
-vi.mock('../mind/audit.constitution.js', () => ({
-  default: ''
+// Mock the mindLoader module
+vi.mock('../utils/mindLoader.js', () => ({
+  loadPrompt: vi.fn()
+}));
+
+// Mock recovery module
+vi.mock('../coordination/recovery.js', () => ({
+  withTimeout: vi.fn((promise) => promise),
+  withRetries: vi.fn(async (fn, retries) => {
+    let lastError;
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  })
 }));
 
 // Mock fs.access
@@ -27,6 +45,8 @@ describe('AuditAgent', () => {
   let auditAgent: AuditAgent;
   let mockBus: ChimeraEventBus;
   let publishSpy: ReturnType<typeof vi.fn>;
+  let mockGeminiChat: GeminiChat;
+  let mockLoadPrompt: Mock;
 
   beforeEach(() => {
     publishSpy = vi.fn();
@@ -35,6 +55,16 @@ describe('AuditAgent', () => {
       subscribe: vi.fn(),
       history: vi.fn(() => [])
     } as unknown as ChimeraEventBus;
+    
+    // Create mock GeminiChat
+    mockGeminiChat = {
+      sendMessage: vi.fn()
+    } as unknown as GeminiChat;
+
+    mockLoadPrompt = vi.mocked(mindLoader.loadPrompt);
+    
+    // Default mock for mindLoader - return a constitution prompt
+    mockLoadPrompt.mockResolvedValue('You are an audit agent. Return JSON: {"pass": boolean, "reasons": string[]}');
     
     auditAgent = new AuditAgent(mockBus);
     vi.clearAllMocks();
@@ -158,7 +188,7 @@ describe('AuditAgent', () => {
       expect(publishSpy).toHaveBeenCalledWith({
         ts: expect.any(Number),
         type: 'log',
-        payload: 'AUDIT PASSED: All quality checks successful'
+        payload: 'AUDIT PASSED: All quality checks successful (rule-based)'
       });
     });
 
@@ -194,7 +224,7 @@ describe('AuditAgent', () => {
       expect(publishSpy).toHaveBeenCalledWith({
         ts: expect.any(Number),
         type: 'log',
-        payload: 'AUDIT FAILED: 1 issue(s) found'
+        payload: 'AUDIT FAILED: 1 issue(s) found (rule-based)'
       });
     });
 
@@ -403,22 +433,209 @@ describe('AuditAgent', () => {
     });
   });
 
-  describe('Constitution rules', () => {
-    it('should work without errors when constitution is empty', async () => {
-      // This test verifies the constitution loading mechanism works
-      // even though the default constitution is empty
+  describe('Gemini integration', () => {
+    it('should use Gemini audit with constitution when GeminiChat is available', async () => {
+      // Create agent with GeminiChat
+      const auditAgentWithGemini = new AuditAgent(mockBus, mockGeminiChat);
+      
+      // Mock successful Gemini response
+      (mockGeminiChat.sendMessage as Mock).mockResolvedValue({
+        candidates: [{
+          content: {
+            parts: [{
+              text: '{"pass": true, "reasons": []}'
+            }]
+          }
+        }]
+      });
+
+      const validPlan = createValidPlan();
+      const context = createContext({
+        planJson: JSON.stringify(validPlan),
+        artifacts: ['test.txt']
+      });
+
+      const result = await auditAgentWithGemini.run(context);
+
+      expect(result.ok).toBe(true);
+      expect(result.output?.pass).toBe(true);
+      expect(result.output?.reasons).toEqual([]);
+
+      // Verify mindLoader was called
+      expect(mockLoadPrompt).toHaveBeenCalledWith('audit.constitution');
+
+      // Verify GeminiChat was called
+      expect(mockGeminiChat.sendMessage).toHaveBeenCalledWith(
+        {
+          message: expect.stringContaining('You are an audit agent')
+        },
+        'audit-validation'
+      );
+
+      // Should publish success log with Gemini indicator
+      expect(publishSpy).toHaveBeenCalledWith({
+        ts: expect.any(Number),
+        type: 'log',
+        payload: 'AUDIT PASSED: All quality checks successful (Gemini)'
+      });
+    });
+
+    it('should handle Gemini audit failure response', async () => {
+      const auditAgentWithGemini = new AuditAgent(mockBus, mockGeminiChat);
+      
+      // Mock Gemini response with failure
+      (mockGeminiChat.sendMessage as Mock).mockResolvedValue({
+        candidates: [{
+          content: {
+            parts: [{
+              text: '{"pass": false, "reasons": ["Missing error handling", "Code quality issues"]}'
+            }]
+          }
+        }]
+      });
+
+      const validPlan = createValidPlan();
+      const context = createContext({
+        planJson: JSON.stringify(validPlan),
+        artifacts: ['test.txt']
+      });
+
+      const result = await auditAgentWithGemini.run(context);
+
+      expect(result.ok).toBe(true);
+      expect(result.output?.pass).toBe(false);
+      expect(result.output?.reasons).toEqual(['Missing error handling', 'Code quality issues']);
+      expect(result.output?.recommendation).toBe('Audit failed: Missing error handling; Code quality issues');
+
+      // Should publish failure log with Gemini indicator
+      expect(publishSpy).toHaveBeenCalledWith({
+        ts: expect.any(Number),
+        type: 'log',
+        payload: 'AUDIT FAILED: 2 issue(s) found (Gemini)'
+      });
+    });
+
+    it('should fall back to rule-based validation when constitution prompt is missing', async () => {
+      const auditAgentWithGemini = new AuditAgent(mockBus, mockGeminiChat);
+      
+      // Mock prompt loading to return null (missing prompt)
+      mockLoadPrompt.mockResolvedValue(null);
+
+      // Mock fs.access to succeed
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+
       const validPlan = createValidPlan();
       const context = createContext({
         planJson: JSON.stringify(validPlan),
         artifacts: []
       });
 
-      const result = await auditAgent.run(context);
+      const result = await auditAgentWithGemini.run(context);
 
-      // Since the mock constitution is empty, no rules should be applied
-      // But the mechanism should work without errors
       expect(result.ok).toBe(true);
       expect(result.output?.pass).toBe(true);
+
+      // Verify error event was emitted
+      expect(publishSpy).toHaveBeenCalledWith({
+        ts: expect.any(Number),
+        type: 'error',
+        payload: {
+          agent: 'AUDIT',
+          message: 'Gemini audit failed: Constitution prompt not found',
+          details: expect.any(String)
+        }
+      });
+
+      // Verify fallback log was emitted
+      expect(publishSpy).toHaveBeenCalledWith({
+        ts: expect.any(Number),
+        type: 'log',
+        payload: 'Falling back to rule-based audit validation'
+      });
+
+      // Should use rule-based validation success message
+      expect(publishSpy).toHaveBeenCalledWith({
+        ts: expect.any(Number),
+        type: 'log',
+        payload: 'AUDIT PASSED: All quality checks successful (rule-based)'
+      });
+
+      // GeminiChat should not be called when prompt is missing
+      expect(mockGeminiChat.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to rule-based validation when Gemini returns invalid JSON', async () => {
+      const auditAgentWithGemini = new AuditAgent(mockBus, mockGeminiChat);
+      
+      // Mock Gemini response with invalid JSON
+      (mockGeminiChat.sendMessage as Mock).mockResolvedValue({
+        candidates: [{
+          content: {
+            parts: [{
+              text: 'invalid json response'
+            }]
+          }
+        }]
+      });
+
+      // Mock fs.access to succeed
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+
+      const validPlan = createValidPlan();
+      const context = createContext({
+        planJson: JSON.stringify(validPlan),
+        artifacts: []
+      });
+
+      const result = await auditAgentWithGemini.run(context);
+
+      expect(result.ok).toBe(true);
+      expect(result.output?.pass).toBe(true);
+
+      // Verify error event was emitted for JSON parse failure
+      expect(publishSpy).toHaveBeenCalledWith({
+        ts: expect.any(Number),
+        type: 'error',
+        payload: {
+          agent: 'AUDIT',
+          message: expect.stringContaining('Invalid JSON response from Gemini'),
+          details: expect.any(String)
+        }
+      });
+
+      // Verify fallback to rule-based validation
+      expect(publishSpy).toHaveBeenCalledWith({
+        ts: expect.any(Number),
+        type: 'log',
+        payload: 'Falling back to rule-based audit validation'
+      });
+    });
+
+    it('should use rule-based validation when no GeminiChat is provided', async () => {
+      // Use agent without GeminiChat (original setup)
+      const validPlan = createValidPlan();
+      const context = createContext({
+        planJson: JSON.stringify(validPlan),
+        artifacts: []
+      });
+
+      // Mock fs.access to succeed
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+
+      const result = await auditAgent.run(context);
+
+      expect(result.ok).toBe(true);
+      expect(result.output?.pass).toBe(true);
+
+      // mindLoader should not be called when no GeminiChat
+      expect(mockLoadPrompt).not.toHaveBeenCalled();
+
+      // Should use rule-based validation success message
+      expect(publishSpy).toHaveBeenCalledWith({
+        ts: expect.any(Number),
+        type: 'log',
+        payload: 'AUDIT PASSED: All quality checks successful (rule-based)'
+      });
     });
   });
 });

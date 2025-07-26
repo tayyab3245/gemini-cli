@@ -44,7 +44,15 @@ export class WorkflowEngine {
     const fullContext: BaseContext = {
       userInput,
       planJson: '{}',
-      planStep: 'initial',
+      planStep: {
+        step_id: 'initial',
+        description: 'Initial workflow step',
+        depends_on: [],
+        status: 'pending',
+        artifacts: [],
+        attempts: 0,
+        max_attempts: 3
+      },
       artifacts: []
     };
 
