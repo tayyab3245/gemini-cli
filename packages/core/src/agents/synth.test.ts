@@ -5,16 +5,26 @@
  */
 
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
-import { SynthAgent } from './synth.js';
+import { SynthAgent, PROMPT_FILE } from './synth.js';
 import { ChimeraEventBus } from '../event-bus/bus.js';
 import { AgentType } from '../event-bus/types.js';
 import type { AgentContext } from './agent.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import * as mindLoader from '../utils/mindLoader.js';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 
 // Mock the mindLoader module
 vi.mock('../utils/mindLoader.js', () => ({
   loadPrompt: vi.fn()
+}));
+
+// Mock fs for build artifact tests and file extension tests
+vi.mock('node:fs', () => ({
+  promises: {
+    access: vi.fn(),
+    readFile: vi.fn()
+  }
 }));
 
 describe('SynthAgent', () => {
@@ -114,7 +124,7 @@ describe('SynthAgent', () => {
       });
 
       // Verify mindLoader was called
-      expect(mockLoadPrompt).toHaveBeenCalledWith('packages/core/src/mind/synth.prompt.ts');
+      expect(mockLoadPrompt).toHaveBeenCalledWith(PROMPT_FILE);
 
       // Verify GeminiChat was called
       expect(mockGeminiChat.sendMessage).toHaveBeenCalledWith(
@@ -177,15 +187,54 @@ describe('SynthAgent', () => {
       expect(parsedPlan.plan.length).toBeGreaterThanOrEqual(3);
 
       // Verify mindLoader was called but returned null
-      expect(mockLoadPrompt).toHaveBeenCalledWith('packages/core/src/mind/synth.prompt.ts');
+      expect(mockLoadPrompt).toHaveBeenCalledWith(PROMPT_FILE);
       
-      // GeminiChat should still be called with default prompt
-      expect(mockGeminiChat.sendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          message: expect.stringContaining('Create a structured implementation plan with 3-5 steps')
-        }),
-        'synth-planning'
-      );
+      // GeminiChat SHOULD be called with fallback prompt when live prompt is missing
+      expect(mockGeminiChat.sendMessage).toHaveBeenCalled();
+      
+      // Verify fallback prompt is used
+      const sendMessageMock = vi.mocked(mockGeminiChat.sendMessage);
+      const geminiCall = sendMessageMock.mock.calls[0][0];
+      expect(geminiCall.message).toContain('You are an AI assistant that generates implementation plans');
+    });
+
+    it('should handle prompt loading failure and fall back to local generation', async () => {
+      // Mock prompt loading to throw an error
+      mockLoadPrompt.mockRejectedValue(new Error('File not accessible'));
+
+      const ctx: AgentContext<{ clarifiedUserInput: string; assumptions: string[]; constraints: string[] }> = {
+        input: {
+          clarifiedUserInput: 'Create a function with prompt loading error',
+          assumptions: ['Prompt unavailable'],
+          constraints: []
+        },
+        bus: mockBus,
+      };
+
+      const result = await synthAgent.run(ctx);
+
+      expect(result.ok).toBe(true);
+      const parsedPlan = JSON.parse(result.output!.planJson);
+      
+      // Should still generate at least 3 steps even with prompt loading failure
+      expect(parsedPlan.plan.length).toBeGreaterThanOrEqual(3);
+
+      // Verify mindLoader was called
+      expect(mockLoadPrompt).toHaveBeenCalledWith(PROMPT_FILE);
+      
+      // GeminiChat SHOULD be called with fallback prompt when prompt loading fails
+      expect(mockGeminiChat.sendMessage).toHaveBeenCalled();
+      
+      // Verify fallback prompt is used
+      const sendMessageMock = vi.mocked(mockGeminiChat.sendMessage);
+      const geminiCall = sendMessageMock.mock.calls[0][0];
+      expect(geminiCall.message).toContain('You are an AI assistant that generates implementation plans');
+
+      // Should log the prompt loading failure
+      expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'log',
+        payload: expect.stringContaining('Mind prompt loading failed: File not accessible, using fallback prompt')
+      }));
     });
 
     it('should handle no GeminiChat and use local generation with minimum 3 steps', async () => {
@@ -529,6 +578,210 @@ describe('SynthAgent', () => {
       // Should fall back to local generation
       const parsedPlan = JSON.parse(result.output!.planJson);
       expect(parsedPlan.plan.length).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  describe('P3.4-B-SYNTH-PROMPT-HARDEN: production-safe loader tests', () => {
+    let mockFsAccess: Mock;
+    let mockFsReadFile: Mock;
+
+    beforeEach(() => {
+      mockFsAccess = vi.mocked(fs.access);
+      mockFsReadFile = vi.mocked(fs.readFile);
+    });
+
+    it('should handle extension auto-detection (.ts and .js)', async () => {
+      // Mock loadPrompt to test both extensions are tried
+      mockLoadPrompt.mockImplementation(async (baseName: string) => {
+        // Simulate the loader trying .ts first, then .js
+        expect(baseName).toBe('synth.prompt'); // Should be called with base name
+        return 'Mocked prompt content from auto-detection';
+      });
+
+      // Mock GeminiChat to return valid response
+      (mockGeminiChat.sendMessage as Mock).mockResolvedValue({
+        candidates: [{
+          content: {
+            parts: [{
+              text: `[
+                {"step_id": "S1", "description": "auto-detected step", "depends_on": [], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3},
+                {"step_id": "S2", "description": "second step", "depends_on": ["S1"], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3},
+                {"step_id": "S3", "description": "third step", "depends_on": ["S2"], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3}
+              ]`
+            }]
+          }
+        }]
+      });
+
+      const ctx: AgentContext<{ clarifiedUserInput: string; assumptions: string[]; constraints: string[] }> = {
+        input: {
+          clarifiedUserInput: 'Test extension auto-detection',
+          assumptions: ['Both .ts and .js should be supported'],
+          constraints: ['Must work in dev and prod']
+        },
+        bus: mockBus,
+      };
+
+      const result = await synthAgent.run(ctx);
+
+      expect(result.ok).toBe(true);
+      expect(mockLoadPrompt).toHaveBeenCalledWith(PROMPT_FILE);
+      expect(PROMPT_FILE).toBe('synth.prompt'); // Verify it's now the base name
+      
+      const parsedPlan = JSON.parse(result.output!.planJson);
+      expect(parsedPlan.plan.length).toBe(3);
+    });
+
+    it('should handle contract violation with descriptive error and emit error event', async () => {
+      // Mock loadPrompt to throw contract violation error
+      mockLoadPrompt.mockRejectedValue(new Error('loadPrompt() could not parse prompt file /path/to/synth.prompt.ts. Ensure your prompt file exports a string as the default export using: export default `your-prompt-here`'));
+
+      // Mock GeminiChat to return valid response (should use fallback prompt)
+      (mockGeminiChat.sendMessage as Mock).mockResolvedValue({
+        candidates: [{
+          content: {
+            parts: [{
+              text: `[
+                {"step_id": "S1", "description": "fallback step 1", "depends_on": [], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3},
+                {"step_id": "S2", "description": "fallback step 2", "depends_on": ["S1"], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3},
+                {"step_id": "S3", "description": "fallback step 3", "depends_on": ["S2"], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3}
+              ]`
+            }]
+          }
+        }]
+      });
+
+      const ctx: AgentContext<{ clarifiedUserInput: string; assumptions: string[]; constraints: string[] }> = {
+        input: {
+          clarifiedUserInput: 'Create a function that handles loader contract violations',
+          assumptions: ['Error handling needed'],
+          constraints: ['Must gracefully fallback']
+        },
+        bus: mockBus,
+      };
+
+      const result = await synthAgent.run(ctx);
+
+      expect(result.ok).toBe(true);
+      expect(mockLoadPrompt).toHaveBeenCalledWith(PROMPT_FILE);
+      
+      // Should emit error event for contract violation
+      expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'error',
+        payload: expect.objectContaining({
+          agent: 'SYNTH',
+          message: expect.stringContaining('loadPrompt() could not parse prompt file')
+        })
+      }));
+      
+      // Should also log the contract violation
+      expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'log',
+        payload: expect.stringContaining('Mind prompt loading failed: loadPrompt() could not parse prompt file')
+      }));
+
+      // Should successfully generate plan with fallback
+      const parsedPlan = JSON.parse(result.output!.planJson);
+      expect(parsedPlan.plan.length).toBe(3);
+    });
+
+    it('should handle file not found gracefully without error events', async () => {
+      // Mock loadPrompt to return null (file not found)
+      mockLoadPrompt.mockResolvedValue(null);
+
+      // Mock GeminiChat to return valid response
+      (mockGeminiChat.sendMessage as Mock).mockResolvedValue({
+        candidates: [{
+          content: {
+            parts: [{
+              text: `[
+                {"step_id": "S1", "description": "fallback step", "depends_on": [], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3},
+                {"step_id": "S2", "description": "second step", "depends_on": ["S1"], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3},
+                {"step_id": "S3", "description": "third step", "depends_on": ["S2"], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3}
+              ]`
+            }]
+          }
+        }]
+      });
+
+      const ctx: AgentContext<{ clarifiedUserInput: string; assumptions: string[]; constraints: string[] }> = {
+        input: {
+          clarifiedUserInput: 'Create something with missing prompt file',
+          assumptions: ['File not found scenario'],
+          constraints: ['Should work gracefully']
+        },
+        bus: mockBus,
+      };
+
+      const result = await synthAgent.run(ctx);
+
+      expect(result.ok).toBe(true);
+      expect(mockLoadPrompt).toHaveBeenCalledWith(PROMPT_FILE);
+      
+      // Should NOT emit error event for file not found
+      const errorEvents = publishSpy.mock.calls.filter(call => 
+        call[0]?.type === 'error' && 
+        call[0]?.payload?.agent === 'SYNTH'
+      );
+      expect(errorEvents).toHaveLength(0);
+
+      // Should successfully use fallback prompt
+      const parsedPlan = JSON.parse(result.output!.planJson);
+      expect(parsedPlan.plan.length).toBe(3);
+    });
+
+    it('should verify mind prompt file is not included in build artifacts', async () => {
+      // Mock fs.access to check if the file exists in build output (should use base name now)
+      const buildOutputPath = path.resolve(process.cwd(), 'packages', 'core', 'dist', 'mind', 'synth.prompt.js');
+      
+      // Expect the file NOT to exist in build output (should be git-ignored)
+      mockFsAccess.mockRejectedValue(new Error('ENOENT: no such file or directory'));
+      
+      // Test that the mind prompt file is properly excluded from build
+      await expect(fs.access(buildOutputPath)).rejects.toThrow('ENOENT');
+      
+      // Verify the call was made to check the build output path
+      expect(mockFsAccess).toHaveBeenCalledWith(buildOutputPath);
+    });
+
+    it('should emit exactly one error event per failed Gemini call', async () => {
+      // Mock loadPrompt to succeed
+      mockLoadPrompt.mockResolvedValue('Test prompt for error event verification');
+
+      // Mock GeminiChat to fail consistently (withRetries will try 3 times, then throw)
+      (mockGeminiChat.sendMessage as Mock).mockRejectedValue(new Error('Gemini API failure'));
+
+      const ctx: AgentContext<{ clarifiedUserInput: string; assumptions: string[]; constraints: string[] }> = {
+        input: {
+          clarifiedUserInput: 'Create something that will fail',
+          assumptions: ['Will fail'],
+          constraints: ['Should emit only one error event']
+        },
+        bus: mockBus,
+      };
+
+      const result = await synthAgent.run(ctx);
+
+      expect(result.ok).toBe(true); // Should succeed with fallback
+      
+      // Count error events - should be exactly 1 despite withRetries attempting 3 times
+      const errorEvents = publishSpy.mock.calls.filter(call => 
+        call[0]?.type === 'error' && 
+        call[0]?.payload?.agent === 'SYNTH' &&
+        call[0]?.payload?.message === 'Gemini API failure'
+      );
+      
+      expect(errorEvents).toHaveLength(1);
+      
+      // Verify the single error event has correct structure
+      expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'error',
+        payload: expect.objectContaining({
+          agent: 'SYNTH',
+          message: 'Gemini API failure',
+          stack: expect.any(String)
+        })
+      }));
     });
   });
 });

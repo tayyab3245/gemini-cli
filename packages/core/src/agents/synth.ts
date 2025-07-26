@@ -10,6 +10,35 @@ import { AgentType } from '../event-bus/types.js';
 import type { PlanStep, ChimeraPlan } from '../interfaces/chimera.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { loadPrompt } from '../utils/mindLoader.js';
+
+// Constant for prompt file path - centralised to avoid string literal duplication
+const PROMPT_FILE = 'synth.prompt';
+
+// Fallback prompt when mind loading fails
+const DEFAULT_SYNTH_PROMPT = `You are an AI assistant that generates implementation plans for development tasks.
+
+**Instructions:**
+1. Break down the user's request into actionable steps
+2. Each step must be specific and concrete
+3. Generate at least 3 steps minimum
+4. Each step should depend on previous steps where logical
+5. Focus on implementation details, not planning
+
+**Output Format:**
+Provide a JSON array of plan steps, where each step has:
+- step_id: unique identifier (e.g., "S1", "S2", etc.)
+- description: what to do in this step
+- depends_on: array of step_ids this depends on
+- status: always "pending"
+- artifacts: empty array initially
+- attempts: 0
+- max_attempts: 3
+
+**Example Output:**
+[
+  {"step_id": "S1", "description": "create initial implementation", "depends_on": [], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3},
+  {"step_id": "S2", "description": "add error handling", "depends_on": ["S1"], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3}
+]`;
 import { withTimeout, withRetries } from '../coordination/recovery.js';
 
 export interface SynthInput {
@@ -22,10 +51,7 @@ export interface SynthOutput {
   planJson: string;
 }
 
-export { PlanStep };
-
-// Default fallback prompt for when mindLoader fails
-const DEFAULT_SYNTH_PROMPT = `Create a structured implementation plan with 3-5 steps. Each step should be atomic and executable. Return only a JSON array of plan steps.`;
+export { PlanStep, PROMPT_FILE };
 
 export class SynthAgent {
   readonly id = AgentType.SYNTH;
@@ -49,26 +75,55 @@ export class SynthAgent {
       let steps: PlanStep[];
 
       if (this.geminiChat) {
-        // Load prompt from mind folder with fallback
-        const prompt = await loadPrompt('packages/core/src/mind/synth.prompt.ts') || DEFAULT_SYNTH_PROMPT;
+        // Try to load prompt from mind folder
+        let prompt: string | null = null;
+        try {
+          prompt = await loadPrompt(PROMPT_FILE);
+        } catch (error) {
+          // Contract violation errors should bubble up as they indicate a serious issue
+          if (error instanceof Error && error.message.includes('loadPrompt()')) {
+            this.bus.publish({ 
+              ts: Date.now(), 
+              type: 'error', 
+              payload: { 
+                agent: 'SYNTH', 
+                message: error.message,
+                stack: error.stack
+              } 
+            });
+          }
+          // Log the error and continue with fallback prompt
+          this.bus.publish({ 
+            ts: Date.now(), 
+            type: 'log', 
+            payload: `Mind prompt loading failed: ${error instanceof Error ? error.message : String(error)}, using fallback prompt` 
+          });
+        }
+
+        // Use live prompt or fallback prompt
+        const finalPrompt = prompt || DEFAULT_SYNTH_PROMPT;
         
-        // Progress: 40% - Prompt loaded, calling Gemini
+        // Progress: 40% - Prompt ready, calling Gemini
         this.bus.publish({ ts: Date.now(), type: 'progress', payload: { percent: 40 }});
 
         try {
-          const response = await this.callGeminiWithRetries(
-            () => withTimeout(this.geminiChat!.sendMessage(
-              {
-                message: `${prompt}
+          const response = await withRetries(
+            () =>
+              withTimeout(
+                this.geminiChat!.sendMessage(
+                  {
+                    message: `${finalPrompt}
 
 User Input: "${ctx.input.clarifiedUserInput}"
 Assumptions: ${ctx.input.assumptions.join(', ')}
 Constraints: ${ctx.input.constraints.join(', ')}
 
 Plan Steps:`
-              },
-              'synth-planning'
-            ), 60_000),
+                  },
+                  'synth-planning'
+                ),
+                60_000
+              ),
             3
           );
 
@@ -77,12 +132,13 @@ Plan Steps:`
 
           // Parse Gemini response
           steps = this.parseGeminiResponse(response);
-          
+
           if (steps.length < 3) {
             this.bus.publish({ ts: Date.now(), type: 'log', payload: 'Gemini plan too short, falling back to local generation' });
             steps = this.generatePlanSteps(ctx.input);
           }
         } catch (geminiError) {
+          // Emit single error event (withRetries already threw, so we emit once here)
           this.bus.publish({ 
             ts: Date.now(), 
             type: 'error', 
@@ -124,49 +180,6 @@ Plan Steps:`
       this.bus.publish({ ts: Date.now(), type: 'agent-end', payload: { id: this.id }});
       return { ok: false, error: `Planning failed: ${error instanceof Error ? error.message : String(error)}` };
     }
-  }
-
-  private async callGeminiWithRetries<T>(
-    fn: () => Promise<T>,
-    max = 3,
-    baseDelayMs = 250,
-  ): Promise<T> {
-    let lastError: Error;
-    
-    for (let attempt = 0; attempt <= max; attempt++) {
-      try {
-        // First attempt is immediate (no delay)
-        if (attempt > 0) {
-          const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-        }
-        
-        return await fn();
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        
-        // Emit error event for each retry failure (but not the final success)
-        if (attempt < max) {
-          this.bus.publish({
-            ts: Date.now(),
-            type: 'error',
-            payload: {
-              agent: 'SYNTH',
-              message: lastError.message,
-              details: lastError.stack
-            }
-          });
-        }
-        
-        // If this was the last attempt, throw the error
-        if (attempt === max) {
-          throw lastError;
-        }
-      }
-    }
-    
-    // This should never be reached, but TypeScript requires it
-    throw lastError!;
   }
 
   private parseGeminiResponse(response: any): PlanStep[] {
@@ -242,10 +255,11 @@ Plan Steps:`
     const { clarifiedUserInput, constraints } = input;
     let complexity = 3; // Start with minimum 3 steps
 
-    // Increase complexity based on input analysis
-    if (clarifiedUserInput.includes('test') || clarifiedUserInput.includes('validate')) complexity++;
-    if (clarifiedUserInput.includes('multiple') || clarifiedUserInput.includes('several')) complexity++;
-    if (constraints.some(c => c.includes('step') || c.includes('phase'))) complexity++;
+    // Increase complexity based on input analysis (case-insensitive)
+    const inputLower = clarifiedUserInput.toLowerCase();
+    if (inputLower.includes('test') || inputLower.includes('validate')) complexity++;
+    if (inputLower.includes('multiple') || inputLower.includes('several')) complexity++;
+    if (constraints.some(c => c.toLowerCase().includes('step') || c.toLowerCase().includes('phase'))) complexity++;
     if (clarifiedUserInput.length > 100) complexity++;
 
     return Math.min(Math.max(complexity, 3), 5); // Ensure 3-5 steps
