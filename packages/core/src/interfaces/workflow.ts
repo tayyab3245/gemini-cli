@@ -3,5 +3,6 @@ export enum WorkflowState {
   PLANNING = 'PLANNING', 
   EXECUTING = 'EXECUTING',
   REVIEW = 'REVIEW',
+  REPLAN = 'REPLAN',
   DONE = 'DONE'
 }

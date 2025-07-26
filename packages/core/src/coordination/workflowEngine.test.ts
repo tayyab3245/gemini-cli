@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ChimeraEventBus } from '../event-bus/bus.js';
 import { WorkflowEngine } from './workflowEngine.js';
+import { WorkflowState } from '../interfaces/workflow.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 
@@ -19,7 +20,10 @@ vi.mock('../agents/audit.js', () => ({
 }));
 vi.mock('./workflow.js', () => ({
   WorkflowStateMachine: vi.fn(() => ({
-    advance: vi.fn()
+    advance: vi.fn(),
+    state: vi.fn().mockReturnValue('INIT'),
+    transitionToReplan: vi.fn(),
+    transitionToDone: vi.fn()
   }))
 }));
 
@@ -75,7 +79,7 @@ describe('WorkflowEngine Integration Tests', () => {
     }) as any);
     
     vi.mocked(AuditAgent).mockImplementation(() => ({
-      run: vi.fn().mockResolvedValue({ ok: true })
+      run: vi.fn().mockResolvedValue({ ok: true, output: { pass: true } })
     }) as any);
 
     // Create mock GeminiChat with correct response structure
@@ -481,6 +485,227 @@ describe('WorkflowEngine Integration Tests', () => {
 
       // Verify the workflow run method completed without throwing (result is void)
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('Re-plan workflow functionality', () => {
+    it('should complete workflow when audit passes on first attempt', async () => {
+      await engine.run('test input');
+
+      // Verify workflow completed successfully
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'log',
+          payload: 'workflow-complete'
+        })
+      );
+
+      // Should not have any replan events
+      const replanEvents = publishedEvents.filter(event => 
+        event.type === 'log' && 
+        typeof event.payload === 'string' && 
+        event.payload.includes('workflow-replan')
+      );
+      expect(replanEvents).toHaveLength(0);
+    });
+
+    it('should re-plan when audit fails and succeed on second attempt', async () => {
+      let auditCallCount = 0;
+      
+      // Override the audit mock constructor to return failing audit on first call
+      vi.mocked(AuditAgent).mockImplementation(() => ({
+        run: vi.fn().mockImplementation(() => {
+          auditCallCount++;
+          if (auditCallCount === 1) {
+            // First audit fails
+            return Promise.resolve({
+              ok: true,
+              output: { 
+                pass: false, 
+                reasons: ['Missing error handling', 'Code quality issues'] 
+              }
+            });
+          } else {
+            // Second audit passes
+            return Promise.resolve({
+              ok: true,
+              output: { pass: true, reasons: [] }
+            });
+          }
+        })
+      }) as any);
+
+      // Mock SynthAgent to track feedback
+      let synthCallCount = 0;
+      vi.mocked(SynthAgent).mockImplementation(() => ({
+        run: vi.fn().mockImplementation((ctx) => {
+          synthCallCount++;
+          // Verify that previous_feedback is passed on second call
+          if (synthCallCount === 2) {
+            expect(ctx.input.previous_feedback).toBe('Missing error handling; Code quality issues');
+          }
+          return Promise.resolve({
+            ok: true,
+            output: { planJson: '{"plan": [{"step_id": "S1", "description": "test", "depends_on": [], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3}]}' }
+          });
+        })
+      }) as any);
+
+      // Create a new engine instance for this test to pick up the new mocks
+      const testEngine = new WorkflowEngine(bus, mockGeminiChat, mockToolRegistry);
+
+      await testEngine.run('test input');
+
+      // Verify re-plan occurred
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'log',
+          payload: 'workflow-replan (attempt 1/3)'
+        })
+      );
+
+      // Verify REPLAN transition occurred (shown by replan event)
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'log',
+          payload: 'workflow-replan (attempt 1/3)'
+        })
+      );
+
+      // Verify workflow eventually completed
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'log',
+          payload: 'workflow-complete'
+        })
+      );
+
+      // Verify audit was called twice
+      expect(auditCallCount).toBe(2);
+      // Verify synth was called twice
+      expect(synthCallCount).toBe(2);
+    });
+
+    it('should fail after maximum re-plan attempts', async () => {
+      // Override audit mock to always fail
+      vi.mocked(AuditAgent).mockImplementation(() => ({
+        run: vi.fn().mockResolvedValue({
+          ok: true,
+          output: { 
+            pass: false, 
+            reasons: ['Persistent issue that cannot be fixed'] 
+          }
+        })
+      }) as any);
+
+      // Create a new engine instance for this test
+      const testEngine = new WorkflowEngine(bus, mockGeminiChat, mockToolRegistry);
+
+      // Expect the workflow to throw after max attempts
+      await expect(testEngine.run('test input')).rejects.toThrow(
+        'Workflow failed after 3 re-plan attempts'
+      );
+
+      // Verify max replan attempts were made
+      const replanEvents = publishedEvents.filter(event => 
+        event.type === 'log' && 
+        typeof event.payload === 'string' && 
+        event.payload.includes('workflow-replan')
+      );
+      expect(replanEvents).toHaveLength(3); // attempts 1, 2, and 3
+
+      // Verify workflow-failed event was emitted
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'log',
+          payload: 'workflow-failed'
+        })
+      );
+
+      // Verify error event with max replans exceeded
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'error',
+          payload: expect.objectContaining({
+            agent: 'WORKFLOW',
+            message: 'Maximum re-plan attempts (3) exceeded',
+            details: 'Audit failures: Persistent issue that cannot be fixed'
+          })
+        })
+      );
+    });
+
+    it('should handle multiple re-plan cycles with different feedback', async () => {
+      let auditCallCount = 0;
+      const auditReasons = [
+        ['Missing tests', 'Poor documentation'],
+        ['Incomplete error handling'],
+        [] // Final success
+      ];
+
+      // Override audit mock to cycle through different failures
+      vi.mocked(AuditAgent).mockImplementation(() => ({
+        run: vi.fn().mockImplementation(() => {
+          const reasons = auditReasons[auditCallCount] || [];
+          auditCallCount++;
+          return Promise.resolve({
+            ok: true,
+            output: { 
+              pass: reasons.length === 0, 
+              reasons: reasons
+            }
+          });
+        })
+      }) as any);
+
+      // Track feedback provided to SynthAgent
+      const feedbackReceived: string[] = [];
+      vi.mocked(SynthAgent).mockImplementation(() => ({
+        run: vi.fn().mockImplementation((ctx) => {
+          if (ctx.input.previous_feedback) {
+            feedbackReceived.push(ctx.input.previous_feedback);
+          }
+          return Promise.resolve({
+            ok: true,
+            output: { planJson: '{"plan": [{"step_id": "S1", "description": "test", "depends_on": [], "status": "pending", "artifacts": [], "attempts": 0, "max_attempts": 3}]}' }
+          });
+        })
+      }) as any);
+
+      // Create a new engine instance for this test
+      const testEngine = new WorkflowEngine(bus, mockGeminiChat, mockToolRegistry);
+
+      await testEngine.run('test input');
+
+      // Verify multiple replan attempts
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'log',
+          payload: 'workflow-replan (attempt 1/3)'
+        })
+      );
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'log',
+          payload: 'workflow-replan (attempt 2/3)'
+        })
+      );
+
+      // Verify correct feedback was provided
+      expect(feedbackReceived).toEqual([
+        'Missing tests; Poor documentation',
+        'Incomplete error handling'
+      ]);
+
+      // Verify final success
+      expect(publishedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'log',
+          payload: 'workflow-complete'
+        })
+      );
+
+      expect(auditCallCount).toBe(3);
     });
   });
 });

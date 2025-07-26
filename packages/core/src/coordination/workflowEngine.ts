@@ -18,6 +18,7 @@ export class WorkflowEngine {
   private synth: SynthAgent;
   private drive: DriveAgent;
   private audit: AuditAgent;
+  private static readonly MAX_REPLANS = 3;
 
   constructor(private bus: ChimeraEventBus, private geminiChat: GeminiChat, private toolRegistry?: ToolRegistry) {
     this.stateMachine = new WorkflowStateMachine(bus);
@@ -57,18 +58,68 @@ export class WorkflowEngine {
     };
 
     try {
-      // ③ call Kernel → Synth → Drive → Audit in sequence with retries and timeouts
+      // ③ Run Kernel first (only once)
       await this.runAgent('KERNEL', fullContext);
-      await this.runAgent('SYNTH', fullContext);
-      await this.runAgent('DRIVE', fullContext);
-      await this.runAgent('AUDIT', fullContext);
 
-      // ④ publish workflow-complete
-      this.bus.publish({
-        ts: Date.now(),
-        type: 'log',
-        payload: 'workflow-complete'
-      });
+      // ④ Initialize replan attempts counter
+      let replanAttempts = 0;
+      
+      // ⑤ Main workflow loop: Synth → Drive → Audit with potential re-plans
+      while (replanAttempts <= WorkflowEngine.MAX_REPLANS) {
+        // Run Synth Agent
+        await this.runAgent('SYNTH', fullContext);
+        
+        // Run Drive Agent
+        await this.runAgent('DRIVE', fullContext);
+        
+        // Run Audit Agent
+        const auditResult = await this.runAgent('AUDIT', fullContext);
+        
+        // Check audit result
+        if (auditResult.output?.pass === true) {
+          // Audit passed - workflow complete
+          this.stateMachine.transitionToDone();
+          this.bus.publish({
+            ts: Date.now(),
+            type: 'log',
+            payload: 'workflow-complete'
+          });
+          return;
+        } else {
+          // Audit failed
+          replanAttempts++;
+          
+          if (replanAttempts > WorkflowEngine.MAX_REPLANS) {
+            // Max replans exceeded - emit workflow-failed
+            this.bus.publish({
+              ts: Date.now(),
+              type: 'error',
+              payload: {
+                agent: 'WORKFLOW',
+                message: `Maximum re-plan attempts (${WorkflowEngine.MAX_REPLANS}) exceeded`,
+                details: `Audit failures: ${auditResult.output?.reasons?.join('; ') || 'Unknown reasons'}`
+              }
+            });
+            this.bus.publish({
+              ts: Date.now(),
+              type: 'log',
+              payload: 'workflow-failed'
+            });
+            throw new Error(`Workflow failed after ${WorkflowEngine.MAX_REPLANS} re-plan attempts`);
+          } else {
+            // Transition to REPLAN state and add feedback to context
+            this.stateMachine.transitionToReplan();
+            this.bus.publish({
+              ts: Date.now(),
+              type: 'log',
+              payload: `workflow-replan (attempt ${replanAttempts}/${WorkflowEngine.MAX_REPLANS})`
+            });
+            
+            // Add audit feedback to context for next iteration
+            fullContext.previous_feedback = auditResult.output?.reasons?.join('; ') || 'Audit failed without specific reasons';
+          }
+        }
+      }
     } catch (error) {
       // Publish error event and re-throw to abort workflow
       this.bus.publish({
@@ -84,7 +135,7 @@ export class WorkflowEngine {
     }
   }
 
-  private async runAgent(agentKind: AgentKind, fullContext: BaseContext): Promise<void> {
+  private async runAgent(agentKind: AgentKind, fullContext: BaseContext): Promise<any> {
     // Emit agent-start event
     this.bus.publish({
       ts: Date.now(),
@@ -92,8 +143,10 @@ export class WorkflowEngine {
       payload: `agent-start-${agentKind}`
     });
 
-    // Advance state machine
-    this.stateMachine.advance();
+    // Advance state machine (only if not in replan cycle for SYNTH)
+    if (!(agentKind === 'SYNTH' && this.stateMachine.state() === WorkflowState.REPLAN)) {
+      this.stateMachine.advance();
+    }
 
     try {
       // Execute agent with retry and timeout logic
@@ -171,6 +224,15 @@ export class WorkflowEngine {
         // Update artifacts from DRIVE execution
         fullContext.artifacts = result.output.artifacts;
       }
+
+      // Emit agent-end event
+      this.bus.publish({
+        ts: Date.now(),
+        type: 'log',
+        payload: `agent-end-${agentKind}`
+      });
+
+      return result;
     } catch (error) {
       // Publish error event on final failure
       this.bus.publish({
@@ -184,13 +246,6 @@ export class WorkflowEngine {
       });
       throw error; // Re-throw to abort workflow
     }
-
-    // Emit agent-end event
-    this.bus.publish({
-      ts: Date.now(),
-      type: 'log',
-      payload: `agent-end-${agentKind}`
-    });
   }
 
   private async executeAgent(agentKind: AgentKind, fullContext: BaseContext): Promise<any> {

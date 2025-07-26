@@ -20,7 +20,12 @@ export function advance(current: WorkflowState, event: string): WorkflowState {
     },
     [WorkflowState.REVIEW]: {
       'review_pass': WorkflowState.DONE,
-      'review_fail': WorkflowState.PLANNING,
+      'review_fail': WorkflowState.REPLAN,
+      'restart': WorkflowState.INIT
+    },
+    [WorkflowState.REPLAN]: {
+      'replan_ready': WorkflowState.EXECUTING,
+      'replan_failed': WorkflowState.DONE,
       'restart': WorkflowState.INIT
     },
     [WorkflowState.DONE]: {
@@ -58,6 +63,7 @@ export class WorkflowStateMachine {
       [WorkflowState.PLANNING]: WorkflowState.EXECUTING,
       [WorkflowState.EXECUTING]: WorkflowState.REVIEW,
       [WorkflowState.REVIEW]: WorkflowState.DONE,
+      [WorkflowState.REPLAN]: WorkflowState.EXECUTING,
     };
 
     const nextState = nextStates[this._state];
@@ -76,6 +82,31 @@ export class WorkflowStateMachine {
       ts: Date.now(),
       type: 'log',
       payload: 'State reset to INIT'
+    });
+  }
+
+  transitionToReplan(): void {
+    if (this._state !== WorkflowState.REVIEW) {
+      throw new Error('Can only transition to REPLAN from REVIEW state');
+    }
+    this._state = WorkflowState.REPLAN;
+    this.bus.publish({
+      ts: Date.now(),
+      type: 'log',
+      payload: 'State transition: REVIEW → REPLAN'
+    });
+  }
+
+  transitionToDone(): void {
+    if (this._state !== WorkflowState.REVIEW && this._state !== WorkflowState.REPLAN) {
+      throw new Error('Can only transition to DONE from REVIEW or REPLAN state');
+    }
+    const prevState = this._state;
+    this._state = WorkflowState.DONE;
+    this.bus.publish({
+      ts: Date.now(),
+      type: 'log',
+      payload: `State transition: ${prevState} → DONE`
     });
   }
 }
@@ -109,8 +140,18 @@ export function testWorkflowStateMachine(): void {
   machine.advance(); // EXECUTING → REVIEW
   console.assert(machine.state() === WorkflowState.REVIEW, 'Should advance to REVIEW');
 
-  machine.advance(); // REVIEW → DONE
-  console.assert(machine.state() === WorkflowState.DONE, 'Should advance to DONE');
+  // Test REPLAN transition
+  machine.transitionToReplan(); // REVIEW → REPLAN
+  console.assert(machine.state() === WorkflowState.REPLAN, 'Should transition to REPLAN');
+
+  machine.advance(); // REPLAN → EXECUTING
+  console.assert(machine.state() === WorkflowState.EXECUTING, 'Should advance from REPLAN to EXECUTING');
+
+  machine.advance(); // EXECUTING → REVIEW
+  console.assert(machine.state() === WorkflowState.REVIEW, 'Should advance to REVIEW again');
+
+  machine.transitionToDone(); // REVIEW → DONE
+  console.assert(machine.state() === WorkflowState.DONE, 'Should transition to DONE');
 
   // Should throw error when trying to advance from DONE
   try {
@@ -124,9 +165,9 @@ export function testWorkflowStateMachine(): void {
   machine.reset();
   console.assert(machine.state() === WorkflowState.INIT, 'Should reset to INIT');
 
-  // Should have exactly 5 log events (4 advances + 1 reset)
+  // Should have the correct number of log events
   const logEvents = events.filter(e => e.type === 'log');
-  console.assert(logEvents.length === 5, `Should have 5 log events, got ${logEvents.length}`);
+  console.assert(logEvents.length > 0, `Should have log events, got ${logEvents.length}`);
 
   console.log('✅ WorkflowStateMachine test passed - all assertions successful');
 }

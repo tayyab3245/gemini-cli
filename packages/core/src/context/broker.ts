@@ -10,6 +10,7 @@ export interface BaseContext {
   planJson?: string;
   planStep?: PlanStep;
   artifacts?: string[];
+  previous_feedback?: string;          // Audit feedback for re-planning
 }
 
 export function buildContextSlice<T extends BaseContext>(
@@ -24,7 +25,8 @@ export function buildContextSlice<T extends BaseContext>(
         clarifiedUserInput: full.clarifiedUserInput || full.userInput,
         assumptions: full.assumptions || [],
         constraints: full.constraints || [],
-        planJson: full.planJson 
+        planJson: full.planJson,
+        previous_feedback: full.previous_feedback
       } as Partial<T>;
     case 'DRIVE':
       return { planStep: full.planStep, artifacts: full.artifacts } as Partial<T>;
