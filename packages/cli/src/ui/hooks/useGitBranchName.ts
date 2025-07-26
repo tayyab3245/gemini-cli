@@ -6,7 +6,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { exec } from 'node:child_process';
-import fs from 'node:fs';
+import * as fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'path';
 
@@ -47,31 +47,27 @@ export function useGitBranchName(cwd: string): string | undefined {
   useEffect(() => {
     fetchBranchName(); // Initial fetch
 
-    const gitLogsHeadPath = path.join(cwd, '.git', 'logs', 'HEAD');
+    const gitHeadPath = path.join(cwd, '.git', 'HEAD');
     let watcher: fs.FSWatcher | undefined;
 
-    const setupWatcher = async () => {
-      try {
-        // Check if .git/logs/HEAD exists, as it might not in a new repo or orphaned head
-        await fsPromises.access(gitLogsHeadPath, fs.constants.F_OK);
-        watcher = fs.watch(gitLogsHeadPath, (eventType: string) => {
-          // Changes to .git/logs/HEAD (appends) indicate HEAD has likely changed
-          if (eventType === 'change' || eventType === 'rename') {
-            // Handle rename just in case
-            fetchBranchName();
-          }
-        });
-      } catch (_watchError) {
-        // Silently ignore watcher errors (e.g. permissions or file not existing),
-        // similar to how exec errors are handled.
-        // The branch name will simply not update automatically.
-      }
-    };
-
-    setupWatcher();
+    // Set up file watcher for .git/HEAD changes
+    try {
+      watcher = fs.watch(gitHeadPath, (eventType: string) => {
+        // Changes to .git/HEAD indicate branch switch or HEAD change
+        if (eventType === 'change' || eventType === 'rename') {
+          fetchBranchName();
+        }
+      });
+    } catch (_watchError) {
+      // Silently ignore watcher errors (e.g. permissions, file not existing, or memfs limitations)
+      // The branch name will simply not update automatically.
+    }
 
     return () => {
-      watcher?.close();
+      if (watcher) {
+        watcher.close();
+        watcher = undefined;
+      }
     };
   }, [cwd, fetchBranchName]);
 

@@ -37,6 +37,9 @@ vi.mock('node:fs/promises', async () => {
 
 const CWD = '/test/project';
 const GIT_HEAD_PATH = `${CWD}/.git/HEAD`;
+// For cross-platform path testing
+import path from 'path';
+const EXPECTED_GIT_HEAD_PATH = path.join(CWD, '.git', 'HEAD');
 
 describe('useGitBranchName', () => {
   beforeEach(() => {
@@ -63,7 +66,7 @@ describe('useGitBranchName', () => {
     const { result, rerender } = renderHook(() => useGitBranchName(CWD));
 
     await act(async () => {
-      vi.runAllTimers(); // Advance timers to trigger useEffect and exec callback
+      vi.runOnlyPendingTimers(); // Run only pending timers to avoid infinite loops
       rerender(); // Rerender to get the updated state
     });
 
@@ -82,7 +85,7 @@ describe('useGitBranchName', () => {
     expect(result.current).toBeUndefined();
 
     await act(async () => {
-      vi.runAllTimers();
+      vi.runOnlyPendingTimers();
       rerender();
     });
     expect(result.current).toBeUndefined();
@@ -102,7 +105,7 @@ describe('useGitBranchName', () => {
 
     const { result, rerender } = renderHook(() => useGitBranchName(CWD));
     await act(async () => {
-      vi.runAllTimers();
+      vi.runOnlyPendingTimers();
       rerender();
     });
     expect(result.current).toBe('a1b2c3d');
@@ -122,7 +125,7 @@ describe('useGitBranchName', () => {
 
     const { result, rerender } = renderHook(() => useGitBranchName(CWD));
     await act(async () => {
-      vi.runAllTimers();
+      vi.runOnlyPendingTimers();
       rerender();
     });
     expect(result.current).toBeUndefined();
@@ -139,7 +142,7 @@ describe('useGitBranchName', () => {
     const { result, rerender } = renderHook(() => useGitBranchName(CWD));
 
     await act(async () => {
-      vi.runAllTimers();
+      vi.runOnlyPendingTimers();
       rerender();
     });
     expect(result.current).toBe('main');
@@ -156,7 +159,7 @@ describe('useGitBranchName', () => {
     // Ensure the watcher is set up before triggering the change
     await act(async () => {
       fs.writeFileSync(GIT_HEAD_PATH, 'ref: refs/heads/develop'); // Trigger watcher
-      vi.runAllTimers(); // Process timers for watcher and exec
+      vi.runOnlyPendingTimers(); // Process timers for watcher and exec
       rerender();
     });
 
@@ -177,7 +180,7 @@ describe('useGitBranchName', () => {
     const { result, rerender } = renderHook(() => useGitBranchName(CWD));
 
     await act(async () => {
-      vi.runAllTimers();
+      vi.runOnlyPendingTimers();
       rerender();
     });
 
@@ -200,7 +203,7 @@ describe('useGitBranchName', () => {
 
     await act(async () => {
       fs.writeFileSync(GIT_HEAD_PATH, 'ref: refs/heads/develop');
-      vi.runAllTimers();
+      vi.runOnlyPendingTimers();
       rerender();
     });
 
@@ -224,12 +227,12 @@ describe('useGitBranchName', () => {
     const { unmount, rerender } = renderHook(() => useGitBranchName(CWD));
 
     await act(async () => {
-      vi.runAllTimers();
+      vi.runOnlyPendingTimers();
       rerender();
     });
 
     unmount();
-    expect(watchMock).toHaveBeenCalledWith(GIT_HEAD_PATH, expect.any(Function));
+    expect(watchMock).toHaveBeenCalledWith(EXPECTED_GIT_HEAD_PATH, expect.any(Function));
     expect(closeMock).toHaveBeenCalled();
   });
 });
