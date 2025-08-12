@@ -100,40 +100,32 @@ function decodeUTF32(buf: Buffer, littleEndian: boolean): string {
  * Falls back to utf8 when no BOM is present.
  */
 export async function readFileWithEncoding(filePath: string): Promise<string> {
-  let fh: fs.promises.FileHandle | null = null;
-  try {
-    fh = await fs.promises.open(filePath, 'r');
-    const probe = Buffer.alloc(4);
-    const { bytesRead } = await fh.read(probe, 0, 4, 0);
-    const head = probe.subarray(0, bytesRead);
-    const bom = detectBOM(head);
+  // Read the file once; detect BOM and decode from the single buffer.
+  const full = await fs.promises.readFile(filePath);
+  if (full.length === 0) return '';
 
-    if (!bom) {
-      // No BOM → treat as UTF‑8
-      return await fs.promises.readFile(filePath, 'utf8');
-    }
+  const bom = detectBOM(full);
+  if (!bom) {
+    // No BOM → treat as UTF‑8
+    return full.toString('utf8');
+  }
 
-    // BOM present → read full buffer and decode accordingly (strip BOM)
-    const full = await fs.promises.readFile(filePath);
-    const content = full.subarray(bom.bomLength);
-    switch (bom.encoding) {
-      case 'utf8':
-        return content.toString('utf8'); // strips U+FEFF
-      case 'utf16le':
-        return content.toString('utf16le');
-      case 'utf16be':
-        return decodeUTF16BE(content);
-      case 'utf32le':
-        return decodeUTF32(content, true);
-      case 'utf32be':
-        return decodeUTF32(content, false);
-      default:
-        return content.toString('utf8');
-    }
-  } finally {
-    if (fh) {
-      try { await fh.close(); } catch { /* best effort */ }
-    }
+  // Strip BOM and decode per encoding
+  const content = full.subarray(bom.bomLength);
+  switch (bom.encoding) {
+    case 'utf8':
+      return content.toString('utf8');
+    case 'utf16le':
+      return content.toString('utf16le');
+    case 'utf16be':
+      return decodeUTF16BE(content);
+    case 'utf32le':
+      return decodeUTF32(content, true);
+    case 'utf32be':
+      return decodeUTF32(content, false);
+    default:
+      // Defensive fallback; should be unreachable
+      return content.toString('utf8');
   }
 }
 
