@@ -92,7 +92,15 @@ async function main() {
       }
       nodeArgs.push(testFile);
 
-      const child = spawn('npx', ['tsx', ...nodeArgs], {
+      const tsxModule = join(
+        __dirname,
+        '..',
+        'node_modules',
+        'tsx',
+        'dist',
+        'cli.mjs',
+      );
+      const child = spawn('node', [tsxModule, ...nodeArgs], {
         stdio: 'pipe',
         env: {
           ...process.env,

@@ -32,11 +32,21 @@ interface BOMInfo {
 export function detectBOM(buf: Buffer): BOMInfo | null {
   if (buf.length >= 4) {
     // UTF-32 LE: FF FE 00 00
-    if (buf[0] === 0xff && buf[1] === 0xfe && buf[2] === 0x00 && buf[3] === 0x00) {
+    if (
+      buf[0] === 0xff &&
+      buf[1] === 0xfe &&
+      buf[2] === 0x00 &&
+      buf[3] === 0x00
+    ) {
       return { encoding: 'utf32le', bomLength: 4 };
     }
     // UTF-32 BE: 00 00 FE FF
-    if (buf[0] === 0x00 && buf[1] === 0x00 && buf[2] === 0xfe && buf[3] === 0xff) {
+    if (
+      buf[0] === 0x00 &&
+      buf[1] === 0x00 &&
+      buf[2] === 0xfe &&
+      buf[3] === 0xff
+    ) {
       return { encoding: 'utf32be', bomLength: 4 };
     }
   }
@@ -48,7 +58,11 @@ export function detectBOM(buf: Buffer): BOMInfo | null {
   }
   if (buf.length >= 2) {
     // UTF-16 LE: FF FE  (but not UTF-32 LE already matched above)
-    if (buf[0] === 0xff && buf[1] === 0xfe && (buf.length < 4 || buf[2] !== 0x00 || buf[3] !== 0x00)) {
+    if (
+      buf[0] === 0xff &&
+      buf[1] === 0xfe &&
+      (buf.length < 4 || buf[2] !== 0x00 || buf[3] !== 0x00)
+    ) {
       return { encoding: 'utf16le', bomLength: 2 };
     }
     // UTF-16 BE: FE FF
@@ -80,8 +94,16 @@ function decodeUTF32(buf: Buffer, littleEndian: boolean): string {
   let out = '';
   for (let i = 0; i < usable; i += 4) {
     const cp = littleEndian
-      ? (buf[i] | (buf[i + 1] << 8) | (buf[i + 2] << 16) | (buf[i + 3] << 24)) >>> 0
-      : (buf[i + 3] | (buf[i + 2] << 8) | (buf[i + 1] << 16) | (buf[i] << 24)) >>> 0;
+      ? (buf[i] |
+          (buf[i + 1] << 8) |
+          (buf[i + 2] << 16) |
+          (buf[i + 3] << 24)) >>>
+        0
+      : (buf[i + 3] |
+          (buf[i + 2] << 8) |
+          (buf[i + 1] << 16) |
+          (buf[i] << 24)) >>>
+        0;
     // Valid planes: 0x0000..0x10FFFF excluding surrogates
     if (cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff)) {
       out += String.fromCodePoint(cp);
@@ -92,26 +114,20 @@ function decodeUTF32(buf: Buffer, littleEndian: boolean): string {
   return out;
 }
 
-/**
- * Read a file as text, honoring BOM encodings (UTF‑8/16/32) and stripping the BOM.
- * Falls back to utf8 when no BOM is present.
- */
 export async function readFileWithEncoding(filePath: string): Promise<string> {
-  // Read the file once; detect BOM and decode from the single buffer.
   const full = await fs.promises.readFile(filePath);
   if (full.length === 0) return '';
 
-  const bom = detectBOM(full);
+  const bom = detectBOM(full.subarray(0, Math.min(4, full.length)));
   if (!bom) {
-    // No BOM → treat as UTF‑8
+    // No BOM → treat as UTF-8
     return full.toString('utf8');
   }
 
-  // Strip BOM and decode per encoding
   const content = full.subarray(bom.bomLength);
   switch (bom.encoding) {
     case 'utf8':
-      return content.toString('utf8');
+      return content.toString('utf8'); // U+FEFF already stripped by BOM removal
     case 'utf16le':
       return content.toString('utf16le');
     case 'utf16be':
@@ -121,7 +137,6 @@ export async function readFileWithEncoding(filePath: string): Promise<string> {
     case 'utf32be':
       return decodeUTF32(content, false);
     default:
-      // Defensive fallback; should be unreachable
       return content.toString('utf8');
   }
 }
@@ -189,7 +204,10 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
     let nonPrintableCount = 0;
     for (let i = 0; i < bytesRead; i++) {
       if (buf[i] === 0) return true; // strong indicator of binary when no BOM
-      if (buf[i] < 7 || (buf[i] > 13 && buf[i] < 32)) {
+      if (buf[i] < 9 || (buf[i] > 13 && buf[i] < 32)) {
+        // Note: threshold intentionally kept at <9 (instead of earlier experiment with <7)
+        // to keep scope tight for #5961 and avoid altering established heuristic beyond
+        // the BOM handling fix.
         nonPrintableCount++;
       }
     }
@@ -228,7 +246,7 @@ export async function detectFileType(
   // The mimetype for various TypeScript extensions (ts, mts, cts, tsx) can be
   // MPEG transport stream (a video format), but we want to assume these are
   // TypeScript files instead.
-  if (['.ts', '.mts', '.cts'].includes(ext)) {
+  if (['.ts', '.mts', '.cts', '.tsx'].includes(ext)) {
     return 'text';
   }
 

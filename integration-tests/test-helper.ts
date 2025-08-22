@@ -5,7 +5,6 @@
  */
 
 import { execSync, spawn } from 'child_process';
-import { parse } from 'shell-quote';
 import { mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -174,14 +173,18 @@ export class TestRig {
 
   sync() {
     // ensure file system is done before spawning
-    execSync('sync', { cwd: this.testDir! });
+    // On Windows, filesystem operations are synchronous so no-op
+    if (process.platform !== 'win32') {
+      execSync('sync', { cwd: this.testDir! });
+    }
   }
 
   run(
     promptOrOptions: string | { prompt?: string; stdin?: string },
     ...args: string[]
   ): Promise<string> {
-    let command = `node ${this.bundlePath} --yolo`;
+    // Build args array directly to avoid shell quoting issues on Windows
+    const commandArgs = ['node', this.bundlePath, '--yolo'];
     const execOptions: {
       cwd: string;
       encoding: 'utf-8';
@@ -192,24 +195,22 @@ export class TestRig {
     };
 
     if (typeof promptOrOptions === 'string') {
-      command += ` --prompt ${JSON.stringify(promptOrOptions)}`;
+      commandArgs.push('--prompt', promptOrOptions);
     } else if (
       typeof promptOrOptions === 'object' &&
       promptOrOptions !== null
     ) {
       if (promptOrOptions.prompt) {
-        command += ` --prompt ${JSON.stringify(promptOrOptions.prompt)}`;
+        commandArgs.push('--prompt', promptOrOptions.prompt);
       }
       if (promptOrOptions.stdin) {
         execOptions.input = promptOrOptions.stdin;
       }
     }
 
-    command += ` ${args.join(' ')}`;
+    commandArgs.push(...args);
 
-    const commandArgs = parse(command);
     const node = commandArgs.shift() as string;
-
     const child = spawn(node, commandArgs as string[], {
       cwd: this.testDir!,
       stdio: 'pipe',
