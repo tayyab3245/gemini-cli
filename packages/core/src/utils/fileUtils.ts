@@ -192,7 +192,7 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
     let nonPrintableCount = 0;
     for (let i = 0; i < bytesRead; i++) {
       if (buf[i] === 0) return true; // strong indicator of binary when no BOM
-      if (buf[i] < 7 || (buf[i] > 13 && buf[i] < 32)) {
+      if (buf[i] < 9 || (buf[i] > 13 && buf[i] < 32)) {
         nonPrintableCount++;
       }
     }
