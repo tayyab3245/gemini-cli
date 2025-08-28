@@ -77,7 +77,6 @@ import type {
   SlashCommand,
 } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
-import { ToolConfirmationOutcome } from '@google/gemini-cli-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { MessageType } from '../types.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
@@ -85,9 +84,11 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import {
   SlashCommandStatus,
+  ToolConfirmationOutcome,
   makeFakeConfig,
+  ToolConfirmationOutcome,
   type IdeClient,
-} from '@google/gemini-cli-core/index.js';
+} from '@google/gemini-cli-core';
 
 function createTestCommand(
   overrides: Partial<SlashCommand>,
@@ -490,7 +491,7 @@ describe('useSlashCommandProcessor', () => {
           description: 'A command from a file',
           action: async () => ({
             type: 'submit_prompt',
-            content: 'The actual prompt from the TOML file.',
+            content: [{ text: 'The actual prompt from the TOML file.' }],
           }),
         },
         CommandKind.FILE,
@@ -506,7 +507,7 @@ describe('useSlashCommandProcessor', () => {
 
       expect(actionResult).toEqual({
         type: 'submit_prompt',
-        content: 'The actual prompt from the TOML file.',
+        content: [{ text: 'The actual prompt from the TOML file.' }],
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
@@ -522,7 +523,7 @@ describe('useSlashCommandProcessor', () => {
           description: 'A command from mcp',
           action: async () => ({
             type: 'submit_prompt',
-            content: 'The actual prompt from the mcp command.',
+            content: [{ text: 'The actual prompt from the mcp command.' }],
           }),
         },
         CommandKind.MCP_PROMPT,
@@ -538,7 +539,7 @@ describe('useSlashCommandProcessor', () => {
 
       expect(actionResult).toEqual({
         type: 'submit_prompt',
-        content: 'The actual prompt from the mcp command.',
+        content: [{ text: 'The actual prompt from the mcp command.' }],
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
