@@ -38,6 +38,7 @@ import { annotateActiveExtensions } from './extension.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import { resolvePath } from '../utils/resolvePath.js';
+import { appEvents } from '../utils/events.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 
@@ -70,12 +71,14 @@ export interface CliArgs {
   telemetryLogPrompts: boolean | undefined;
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
+  allowedTools: string[] | undefined;
   experimentalAcp: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
   screenReader: boolean | undefined;
+  sessionSummary: string | undefined;
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
@@ -189,6 +192,11 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           string: true,
           description: 'Allowed MCP server names',
         })
+        .option('allowed-tools', {
+          type: 'array',
+          string: true,
+          description: 'Tools that are allowed to run without confirmation',
+        })
         .option('extensions', {
           alias: 'e',
           type: 'array',
@@ -220,7 +228,54 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           description: 'Enable screen reader mode for accessibility.',
           default: false,
         })
-
+        .option('session-summary', {
+          type: 'string',
+          description: 'File to write session summary to.',
+        })
+        .deprecateOption(
+          'telemetry',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'telemetry-target',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'telemetry-otlp-endpoint',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'telemetry-otlp-protocol',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'telemetry-log-prompts',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'telemetry-outfile',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'show-memory-usage',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'sandbox-image',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'proxy',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'checkpointing',
+          'Use settings.json instead. This flag will be removed in a future version.',
+        )
+        .deprecateOption(
+          'all-files',
+          'Use @ includes in the application instead. This flag will be removed in a future version.',
+        )
         .check((argv) => {
           if (argv.prompt && argv['promptInteractive']) {
             throw new Error(
@@ -238,7 +293,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
     // Register MCP subcommands
     .command(mcpCommand);
 
-  if (settings?.extensionManagement ?? false) {
+  if (settings?.experimental?.extensionManagement ?? false) {
     yargsInstance.command(extensionsCommand);
   }
 
@@ -278,6 +333,7 @@ export async function loadHierarchicalGeminiMemory(
   fileService: FileDiscoveryService,
   settings: Settings,
   extensionContextFilePaths: string[] = [],
+  folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
   fileFilteringOptions?: FileFilteringOptions,
 ): Promise<{ memoryContent: string; fileCount: number }> {
@@ -303,9 +359,10 @@ export async function loadHierarchicalGeminiMemory(
     debugMode,
     fileService,
     extensionContextFilePaths,
+    folderTrust,
     memoryImportFormat,
     fileFilteringOptions,
-    settings.memoryDiscoveryMaxDirs,
+    settings.context?.discoveryMaxDirs,
   );
 }
 
@@ -322,18 +379,20 @@ export async function loadCliConfig(
       (v) => v === 'true' || v === '1',
     ) ||
     false;
-  const memoryImportFormat = settings.memoryImportFormat || 'tree';
+  const memoryImportFormat = settings.context?.importFormat || 'tree';
 
-  const ideMode = settings.ideMode ?? false;
+  const ideMode = settings.ide?.enabled ?? false;
 
-  const folderTrustFeature = settings.folderTrustFeature ?? false;
-  const folderTrustSetting = settings.folderTrust ?? true;
+  const folderTrustFeature =
+    settings.security?.folderTrust?.featureEnabled ?? false;
+  const folderTrustSetting = settings.security?.folderTrust?.enabled ?? true;
   const folderTrust = folderTrustFeature && folderTrustSetting;
-  const trustedFolder = isWorkspaceTrusted(settings);
+  const trustedFolder = isWorkspaceTrusted(settings) ?? true;
 
   const allExtensions = annotateActiveExtensions(
     extensions,
     argv.extensions || [],
+    cwd,
   );
 
   const activeExtensions = extensions.filter(
@@ -344,8 +403,8 @@ export async function loadCliConfig(
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
   // directly to the Config constructor in core, and have core handle setGeminiMdFilename.
   // However, loadHierarchicalGeminiMemory is called *before* createServerConfig.
-  if (settings.contextFileName) {
-    setServerGeminiMdFilename(settings.contextFileName);
+  if (settings.context?.fileName) {
+    setServerGeminiMdFilename(settings.context.fileName);
   } else {
     // Reset to default if not provided in settings.
     setServerGeminiMdFilename(getCurrentGeminiMdFilename());
@@ -359,21 +418,24 @@ export async function loadCliConfig(
 
   const fileFiltering = {
     ...DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
-    ...settings.fileFiltering,
+    ...settings.context?.fileFiltering,
   };
 
-  const includeDirectories = (settings.includeDirectories || [])
+  const includeDirectories = (settings.context?.includeDirectories || [])
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
 
   // Call the (now wrapper) loadHierarchicalGeminiMemory which calls the server's version
   const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
     cwd,
-    settings.loadMemoryFromIncludeDirectories ? includeDirectories : [],
+    settings.context?.loadMemoryFromIncludeDirectories
+      ? includeDirectories
+      : [],
     debugMode,
     fileService,
     settings,
     extensionContextFilePaths,
+    trustedFolder,
     memoryImportFormat,
     fileFiltering,
   );
@@ -445,16 +507,16 @@ export async function loadCliConfig(
   const blockedMcpServers: Array<{ name: string; extensionName: string }> = [];
 
   if (!argv.allowedMcpServerNames) {
-    if (settings.allowMCPServers) {
+    if (settings.mcp?.allowed) {
       mcpServers = allowedMcpServers(
         mcpServers,
-        settings.allowMCPServers,
+        settings.mcp.allowed,
         blockedMcpServers,
       );
     }
 
-    if (settings.excludeMCPServers) {
-      const excludedNames = new Set(settings.excludeMCPServers.filter(Boolean));
+    if (settings.mcp?.excluded) {
+      const excludedNames = new Set(settings.mcp.excluded.filter(Boolean));
       if (excludedNames.size > 0) {
         mcpServers = Object.fromEntries(
           Object.entries(mcpServers).filter(([key]) => !excludedNames.has(key)),
@@ -472,10 +534,10 @@ export async function loadCliConfig(
   }
 
   const sandboxConfig = await loadSandboxConfig(settings, argv);
-
-  // The screen reader argument takes precedence over the accessibility setting.
   const screenReader =
-    argv.screenReader ?? settings.accessibility?.screenReader ?? false;
+    argv.screenReader !== undefined
+      ? argv.screenReader
+      : (settings.ui?.accessibility?.screenReader ?? false);
   return new Config({
     sessionId,
     embeddingModel: DEFAULT_GEMINI_EMBEDDING_MODEL,
@@ -483,22 +545,24 @@ export async function loadCliConfig(
     targetDir: cwd,
     includeDirectories,
     loadMemoryFromIncludeDirectories:
-      settings.loadMemoryFromIncludeDirectories || false,
+      settings.context?.loadMemoryFromIncludeDirectories || false,
     debugMode,
     question,
     fullContext: argv.allFiles || false,
-    coreTools: settings.coreTools || undefined,
+    coreTools: settings.tools?.core || undefined,
+    allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools,
-    toolDiscoveryCommand: settings.toolDiscoveryCommand,
-    toolCallCommand: settings.toolCallCommand,
-    mcpServerCommand: settings.mcpServerCommand,
+    toolDiscoveryCommand: settings.tools?.discoveryCommand,
+    toolCallCommand: settings.tools?.callCommand,
+    mcpServerCommand: settings.mcp?.serverCommand,
     mcpServers,
     userMemory: memoryContent,
     geminiMdFileCount: fileCount,
     approvalMode,
-    showMemoryUsage: argv.showMemoryUsage || settings.showMemoryUsage || false,
+    showMemoryUsage:
+      argv.showMemoryUsage || settings.ui?.showMemoryUsage || false,
     accessibility: {
-      ...settings.accessibility,
+      ...settings.ui?.accessibility,
       screenReader,
     },
     telemetry: {
@@ -517,15 +581,17 @@ export async function loadCliConfig(
       logPrompts: argv.telemetryLogPrompts ?? settings.telemetry?.logPrompts,
       outfile: argv.telemetryOutfile ?? settings.telemetry?.outfile,
     },
-    usageStatisticsEnabled: settings.usageStatisticsEnabled ?? true,
+    usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     // Git-aware file filtering settings
     fileFiltering: {
-      respectGitIgnore: settings.fileFiltering?.respectGitIgnore,
-      respectGeminiIgnore: settings.fileFiltering?.respectGeminiIgnore,
+      respectGitIgnore: settings.context?.fileFiltering?.respectGitIgnore,
+      respectGeminiIgnore: settings.context?.fileFiltering?.respectGeminiIgnore,
       enableRecursiveFileSearch:
-        settings.fileFiltering?.enableRecursiveFileSearch,
+        settings.context?.fileFiltering?.enableRecursiveFileSearch,
+      disableFuzzySearch: settings.context?.fileFiltering?.disableFuzzySearch,
     },
-    checkpointing: argv.checkpointing || settings.checkpointing?.enabled,
+    checkpointing:
+      argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:
       argv.proxy ||
       process.env['HTTPS_PROXY'] ||
@@ -534,26 +600,27 @@ export async function loadCliConfig(
       process.env['http_proxy'],
     cwd,
     fileDiscoveryService: fileService,
-    bugCommand: settings.bugCommand,
-    model: argv.model || settings.model || DEFAULT_GEMINI_MODEL,
+    bugCommand: settings.advanced?.bugCommand,
+    model: argv.model || settings.model?.name || DEFAULT_GEMINI_MODEL,
     extensionContextFilePaths,
-    maxSessionTurns: settings.maxSessionTurns ?? -1,
+    maxSessionTurns: settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.experimentalAcp || false,
     listExtensions: argv.listExtensions || false,
     extensions: allExtensions,
     blockedMcpServers,
     noBrowser: !!process.env['NO_BROWSER'],
-    summarizeToolOutput: settings.summarizeToolOutput,
+    summarizeToolOutput: settings.model?.summarizeToolOutput,
     ideMode,
-    chatCompression: settings.chatCompression,
+    chatCompression: settings.model?.chatCompression,
     folderTrustFeature,
     folderTrust,
     interactive,
     trustedFolder,
-    useRipgrep: settings.useRipgrep,
-    shouldUseNodePtyShell: settings.shouldUseNodePtyShell,
-    skipNextSpeakerCheck: settings.skipNextSpeakerCheck,
-    enablePromptCompletion: settings.enablePromptCompletion ?? false,
+    useRipgrep: settings.tools?.useRipgrep,
+    shouldUseNodePtyShell: settings.tools?.usePty,
+    skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
+    enablePromptCompletion: settings.general?.enablePromptCompletion ?? false,
+    eventEmitter: appEvents,
   });
 }
 
@@ -615,7 +682,7 @@ function mergeExcludeTools(
   extraExcludes?: string[] | undefined,
 ): string[] {
   const allExcludeTools = new Set([
-    ...(settings.excludeTools || []),
+    ...(settings.tools?.exclude || []),
     ...(extraExcludes || []),
   ]);
   for (const extension of extensions) {
