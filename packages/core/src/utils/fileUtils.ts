@@ -35,11 +35,21 @@ interface BOMInfo {
 export function detectBOM(buf: Buffer): BOMInfo | null {
   if (buf.length >= 4) {
     // UTF-32 LE: FF FE 00 00
-    if (buf[0] === 0xff && buf[1] === 0xfe && buf[2] === 0x00 && buf[3] === 0x00) {
+    if (
+      buf[0] === 0xff &&
+      buf[1] === 0xfe &&
+      buf[2] === 0x00 &&
+      buf[3] === 0x00
+    ) {
       return { encoding: 'utf32le', bomLength: 4 };
     }
     // UTF-32 BE: 00 00 FE FF
-    if (buf[0] === 0x00 && buf[1] === 0x00 && buf[2] === 0xfe && buf[3] === 0xff) {
+    if (
+      buf[0] === 0x00 &&
+      buf[1] === 0x00 &&
+      buf[2] === 0xfe &&
+      buf[3] === 0xff
+    ) {
       return { encoding: 'utf32be', bomLength: 4 };
     }
   }
@@ -51,7 +61,11 @@ export function detectBOM(buf: Buffer): BOMInfo | null {
   }
   if (buf.length >= 2) {
     // UTF-16 LE: FF FE  (but not UTF-32 LE already matched above)
-    if (buf[0] === 0xff && buf[1] === 0xfe && (buf.length < 4 || buf[2] !== 0x00 || buf[3] !== 0x00)) {
+    if (
+      buf[0] === 0xff &&
+      buf[1] === 0xfe &&
+      (buf.length < 4 || buf[2] !== 0x00 || buf[3] !== 0x00)
+    ) {
       return { encoding: 'utf16le', bomLength: 2 };
     }
     // UTF-16 BE: FE FF
@@ -83,8 +97,16 @@ function decodeUTF32(buf: Buffer, littleEndian: boolean): string {
   let out = '';
   for (let i = 0; i < usable; i += 4) {
     const cp = littleEndian
-      ? (buf[i] | (buf[i + 1] << 8) | (buf[i + 2] << 16) | (buf[i + 3] << 24)) >>> 0
-      : (buf[i + 3] | (buf[i + 2] << 8) | (buf[i + 1] << 16) | (buf[i] << 24)) >>> 0;
+      ? (buf[i] |
+          (buf[i + 1] << 8) |
+          (buf[i + 2] << 16) |
+          (buf[i + 3] << 24)) >>>
+        0
+      : (buf[i + 3] |
+          (buf[i + 2] << 8) |
+          (buf[i + 1] << 16) |
+          (buf[i] << 24)) >>>
+        0;
     // Valid planes: 0x0000..0x10FFFF excluding surrogates
     if (cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff)) {
       out += String.fromCodePoint(cp);

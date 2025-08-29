@@ -2,9 +2,6 @@
  * @license
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
- *
- * End-to-end BOM decoding regression test.
- * Skipped on Windows due to pre-existing integration harness path issue (follow-up issue to be filed).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -28,7 +25,7 @@ const utf16BE = (s: string) => {
 };
 const utf32LE = (s: string) => {
   const bom = Buffer.from([0xff, 0xfe, 0x00, 0x00]);
-  const cps = Array.from(s, c => c.codePointAt(0)!);
+  const cps = Array.from(s, (c) => c.codePointAt(0)!);
   const payload = Buffer.alloc(cps.length * 4);
   cps.forEach((cp, i) => {
     const o = i * 4;
@@ -41,7 +38,7 @@ const utf32LE = (s: string) => {
 };
 const utf32BE = (s: string) => {
   const bom = Buffer.from([0x00, 0x00, 0xfe, 0xff]);
-  const cps = Array.from(s, c => c.codePointAt(0)!);
+  const cps = Array.from(s, (c) => c.codePointAt(0)!);
   const payload = Buffer.alloc(cps.length * 4);
   cps.forEach((cp, i) => {
     const o = i * 4;
@@ -74,7 +71,7 @@ d('BOM end-to-end integration', () => {
   async function runAndAssert(
     filename: string,
     content: Buffer,
-    expectedText: string | null
+    expectedText: string | null,
   ) {
     writeFileSync(join(dir, filename), content);
     const prompt = `read the file ${filename} and output its exact contents`;
@@ -85,7 +82,7 @@ d('BOM end-to-end integration', () => {
       expect(
         lower.includes('binary') ||
           lower.includes('skipped binary file') ||
-          lower.includes('cannot display')
+          lower.includes('cannot display'),
       ).toBeTruthy();
     } else {
       expect(output.includes(expectedText)).toBeTruthy();
@@ -101,7 +98,7 @@ d('BOM end-to-end integration', () => {
     await runAndAssert(
       'utf16le.txt',
       utf16LE('BOM_OK UTF-16LE'),
-      'BOM_OK UTF-16LE'
+      'BOM_OK UTF-16LE',
     );
   });
 
@@ -109,7 +106,7 @@ d('BOM end-to-end integration', () => {
     await runAndAssert(
       'utf16be.txt',
       utf16BE('BOM_OK UTF-16BE'),
-      'BOM_OK UTF-16BE'
+      'BOM_OK UTF-16BE',
     );
   });
 
@@ -117,7 +114,7 @@ d('BOM end-to-end integration', () => {
     await runAndAssert(
       'utf32le.txt',
       utf32LE('BOM_OK UTF-32LE'),
-      'BOM_OK UTF-32LE'
+      'BOM_OK UTF-32LE',
     );
   });
 
@@ -125,7 +122,7 @@ d('BOM end-to-end integration', () => {
     await runAndAssert(
       'utf32be.txt',
       utf32BE('BOM_OK UTF-32BE'),
-      'BOM_OK UTF-32BE'
+      'BOM_OK UTF-32BE',
     );
   });
 
